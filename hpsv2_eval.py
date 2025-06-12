@@ -355,19 +355,16 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp', type=str, default='baseline', help='Experiment name')
     parser.add_argument('--img_dir', type=str, default='/workspace/jh/flux/outputs/250prompts', help='image directory')
-    parser.add_argument('--prompt_csv_path', type=str, default='../prompts_250.csv', help='prompt csv path')
+    parser.add_argument('--prompt_file', type=str, default='../prompts_250.csv', help='prompt csv path')
     args = parser.parse_args()
     
     exp_name = args.exp
-    # mkdir if not exists
-    if not os.path.exists(f'../{exp_name}'):
-        os.makedirs(f'../{exp_name}')
     img_dir = f'{args.img_dir}/{exp_name}'
-    prompt_csv_path = args.prompt_csv_path
-    if not os.path.exists(prompt_csv_path):
-        print(f"Error: Prompt file not found at {prompt_csv_path}")
+    prompt_file = args.prompt_file
+    if not os.path.exists(prompt_file):
+        print(f"Error: Prompt file not found at {prompt_file}")
         exit(1)
-    output_dir = f'../{exp_name}/hpsv2_eval'
+    output_dir = f'../hpsv2_eval/{exp_name}'
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    analyze_hps_scores(img_dir, prompt_csv_path, output_dir, exp_name)
+    analyze_hps_scores(img_dir, prompt_file, output_dir, exp_name)
