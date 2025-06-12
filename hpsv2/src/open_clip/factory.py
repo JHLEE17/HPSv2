@@ -224,6 +224,8 @@ def create_model(
                 f'Pretrained weights were required for (model: {model_name}, pretrained: {pretrained}) but not loaded.')
 
         model.to(device=device)
+        if device == 'hpu':
+            model = torch.compile(model,backend="hpu_backend")
         if precision in ("fp16", "bf16"):
             convert_weights_to_lp(model, dtype=torch.bfloat16 if precision == 'bf16' else torch.float16)
 

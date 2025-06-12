@@ -83,6 +83,8 @@ def profile_model(model_name):
     model.eval()
     if torch.cuda.is_available():
         model = model.cuda()
+    elif torch.hpu.is_available():
+        model = model.to('hpu')
 
     if isinstance(model.visual.image_size, (tuple, list)):
         image_input_size = (3,) + tuple(model.visual.image_size[-2:])

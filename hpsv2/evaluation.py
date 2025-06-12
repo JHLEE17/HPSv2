@@ -18,6 +18,9 @@ from hpsv2.src.training.train import calc_ImageReward, inversion_score
 from hpsv2.src.training.data import ImageRewardDataset, collate_rank, RankingDataset
 from hpsv2.utils import root_path, hps_version_map
 
+import habana_frameworks.torch.core as htcore
+
+DEVICE = 'cuda' if torch.cuda.is_available() else 'hpu' if torch.hpu.is_available() else 'cpu'
 
 class BenchmarkDataset(Dataset):
     def __init__(self, meta_file, image_folder,transforms, tokenizer):
@@ -63,7 +66,7 @@ def evaluate_IR(data_path, image_folder, model, batch_size, preprocess_val, toke
             num_images = num_images.to(device=device, non_blocking=True)
             labels = labels.to(device=device, non_blocking=True)
 
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type=DEVICE):
                 outputs = model(images, texts)
                 image_features, text_features, logit_scale = outputs["image_features"], outputs["text_features"], outputs["logit_scale"]
                 logits_per_image = logit_scale * image_features @ text_features.T * 100
@@ -91,7 +94,7 @@ def evaluate_rank(data_path, image_folder, model, batch_size, preprocess_val, to
             num_images = num_images.to(device=device, non_blocking=True)
             labels = labels.to(device=device, non_blocking=True)
 
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type=DEVICE):
                 outputs = model(images, texts)
                 image_features, text_features, logit_scale = outputs["image_features"], outputs["text_features"], outputs["logit_scale"]
                 logits_per_image = logit_scale * image_features @ text_features.T
@@ -135,7 +138,7 @@ def evaluate_benchmark(data_path, img_path, model, batch_size, preprocess_val, t
                 images = images.to(device=device, non_blocking=True)
                 texts = texts.to(device=device, non_blocking=True)
 
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast(device_type=DEVICE):
                     outputs = model(images, texts)
                     image_features, text_features = outputs["image_features"], outputs["text_features"]
                     logits_per_image = image_features @ text_features.T * 100
@@ -172,7 +175,7 @@ def evaluate_benchmark_all(data_path, root_dir, model, batch_size, preprocess_va
                     images = images.to(device=device, non_blocking=True)
                     texts = texts.to(device=device, non_blocking=True)
 
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast(device_type=DEVICE):
                         outputs = model(images, texts)
                         image_features, text_features = outputs["image_features"], outputs["text_features"]
                         logits_per_image = image_features @ text_features.T * 100
@@ -204,7 +207,7 @@ def evaluate_benchmark_DB(data_path, root_dir, model, batch_size, preprocess_val
                 images = images.to(device=device, non_blocking=True)
                 texts = texts.to(device=device, non_blocking=True)
 
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast(device_type=DEVICE):
                     outputs = model(images, texts)
                     image_features, text_features = outputs["image_features"], outputs["text_features"]
                     logits_per_image = image_features @ text_features.T * 100
@@ -220,7 +223,12 @@ def evaluate_benchmark_DB(data_path, root_dir, model, batch_size, preprocess_val
 model_dict = {}
 model_name = "ViT-H-14"
 precision = 'amp'
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+if torch.cuda.is_available():
+    device = 'cuda'
+elif torch.hpu.is_available():
+    device = 'hpu'
+else:
+    device = 'cpu'
 
 def initialize_model():
     if not model_dict:
@@ -266,6 +274,8 @@ def evaluate(mode: str, root_dir: str, data_path: str = os.path.join(root_path,'
     tokenizer = get_tokenizer(model_name)
     model = model.to(device)
     model.eval()
+    if device == 'hpu':
+        model = torch.compile(model,backend="hpu_backend")
     print('Loading model successfully!')
     
     

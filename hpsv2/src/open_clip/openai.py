@@ -50,9 +50,19 @@ def load_openai_model(
         A torchvision transform that converts a PIL image into a tensor that the returned model can take as its input
     """
     if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            device = 'cuda'
+        elif torch.hpu.is_available():
+            device = 'hpu'
+        else:
+            device = 'cpu'
     if precision is None:
-        precision = 'fp32' if device == 'cpu' else 'fp16'
+        if device == 'cpu':
+            precision = 'fp32'
+        elif device == 'hpu':
+            precision = 'bf16'
+        else:
+            precision = 'fp16'
 
     if get_pretrained_url(name, 'openai'):
         model_path = download_pretrained_from_url(get_pretrained_url(name, 'openai'), cache_dir=cache_dir)
@@ -83,6 +93,8 @@ def load_openai_model(
 
         # model from OpenAI state dict is in manually cast fp16 mode, must be converted for AMP/fp32/bf16 use
         model = model.to(device)
+        if device == 'hpu':
+            model = torch.compile(model,backend="hpu_backend")
         if precision.startswith('amp') or precision == 'fp32':
             model.float()
         elif precision == 'bf16':
@@ -105,7 +117,7 @@ def load_openai_model(
 
         for graph in graphs:
             for node in graph.findAllNodes("prim::Constant"):
-                if "value" in node.attributeNames() and str(node["value"]).startswith("cuda"):
+                if "value" in node.attributeNames() and (str(node["value"]).startswith("cuda") or str(node["value"]).startswith("hpu")):
                     node.copyAttributes(device_node)
 
     model.apply(patch_device)

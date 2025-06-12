@@ -320,7 +320,10 @@ def main(rank, args):
             hvd.broadcast_parameters(model.state_dict(), root_rank=0)
             hvd.broadcast_optimizer_state(optimizer, root_rank=0)
 
-        scaler = GradScaler() if args.precision == "amp" else None
+        if torch.hpu.is_available():
+            scaler = None
+        else:
+            scaler = GradScaler() if args.precision == "amp" else None
 
     # optionally resume from a checkpoint
     start_iterations = 0

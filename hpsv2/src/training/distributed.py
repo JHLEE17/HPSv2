@@ -112,6 +112,8 @@ def init_distributed_device(args):
         else:
             device = 'cuda:0'
         torch.cuda.set_device(device)
+    elif torch.hpu.is_available():
+        device = 'hpu'
     else:
         device = 'cpu'
     args.device = device

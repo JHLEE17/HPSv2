@@ -13,7 +13,12 @@ from hpsv2.utils import root_path, hps_version_map
 warnings.filterwarnings("ignore", category=UserWarning)
 
 model_dict = {}
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+if torch.cuda.is_available():
+    device = 'cuda'
+elif torch.hpu.is_available():
+    device = 'hpu'
+else:
+    device = 'cpu'
 
 def initialize_model():
     if not model_dict:
@@ -56,6 +61,9 @@ def score(img_path: Union[list, str, Image.Image], prompt: str, cp: str = None, 
     tokenizer = get_tokenizer('ViT-H-14')
     model = model.to(device)
     model.eval()
+    if device == 'hpu':
+        model = torch.compile(model,backend="hpu_backend")
+        print(f"Using HPU device and compiled model")
     
     
     if isinstance(img_path, list):
@@ -73,12 +81,13 @@ def score(img_path: Union[list, str, Image.Image], prompt: str, cp: str = None, 
                 # Process the prompt
                 text = tokenizer([prompt]).to(device=device, non_blocking=True)
                 # Calculate the HPS
-                with torch.cuda.amp.autocast():
+                import pdb; pdb.set_trace()
+                with torch.amp.autocast(device_type=device):
                     outputs = model(image, text)
                     image_features, text_features = outputs["image_features"], outputs["text_features"]
                     logits_per_image = image_features @ text_features.T
 
-                    hps_score = torch.diagonal(logits_per_image).cpu().numpy()
+                    hps_score = torch.diagonal(logits_per_image).cpu()#.numpy()
             result.append(hps_score[0])    
         return result
     elif isinstance(img_path, str):
@@ -89,12 +98,12 @@ def score(img_path: Union[list, str, Image.Image], prompt: str, cp: str = None, 
             # Process the prompt
             text = tokenizer([prompt]).to(device=device, non_blocking=True)
             # Calculate the HPS
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type=device):
                 outputs = model(image, text)
                 image_features, text_features = outputs["image_features"], outputs["text_features"]
                 logits_per_image = image_features @ text_features.T
 
-                hps_score = torch.diagonal(logits_per_image).cpu().numpy()
+                hps_score = torch.diagonal(logits_per_image).cpu()#.numpy()
         return [hps_score[0]]
     elif isinstance(img_path, Image.Image):
         # Load your image and prompt
@@ -104,12 +113,12 @@ def score(img_path: Union[list, str, Image.Image], prompt: str, cp: str = None, 
             # Process the prompt
             text = tokenizer([prompt]).to(device=device, non_blocking=True)
             # Calculate the HPS
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type=device):
                 outputs = model(image, text)
                 image_features, text_features = outputs["image_features"], outputs["text_features"]
                 logits_per_image = image_features @ text_features.T
 
-                hps_score = torch.diagonal(logits_per_image).cpu().numpy()
+                hps_score = torch.diagonal(logits_per_image).cpu()#.numpy()
         return [hps_score[0]]
     else:
         raise TypeError('The type of parameter img_path is illegal.')
