@@ -74,7 +74,12 @@ def analyze_scores(img_dir, prompt_csv_path, output_dir, exp_name, scorer):
     prints statistics, and creates a visualization of the score distribution.
     """
     # Define paths based on the scorer
-    SCORE_NAME = 'hps_score' if scorer == 'hpsv2' else 'pickscore'
+    if scorer == 'hpsv2':
+        SCORE_NAME = 'hps_score'
+    elif scorer == 'pickscore':
+        SCORE_NAME = 'pickscore_score'
+    elif scorer == 'imagereward':
+        SCORE_NAME = 'imagereward_score'
     OUTPUT_CSV_PATH = os.path.join(output_dir, f'{scorer}_scores.csv')
     OUTPUT_FIG_PATH = os.path.join(output_dir, f'{scorer}_scores_histogram.png')
     OUTPUT_STATS_PATH = os.path.join(output_dir, f'{scorer}_top_bottom_scores.txt')
@@ -113,25 +118,37 @@ def analyze_scores(img_dir, prompt_csv_path, output_dir, exp_name, scorer):
         tokenizer = get_tokenizer('ViT-H-14')
     
     elif scorer == 'pickscore':
-        from transformers import AutoProcessor, AutoModel
+        from transformers import AutoProcessor, CLIPModel
         processor_name_or_path = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
         model_pretrained_name_or_path = "yuvalkirstain/PickScore_v1"
         processor = AutoProcessor.from_pretrained(processor_name_or_path)
-        model = AutoModel.from_pretrained(model_pretrained_name_or_path)
+        model = CLIPModel.from_pretrained(model_pretrained_name_or_path)
         tokenizer = None # PickScore's processor handles text
+    
+    elif scorer == 'imagereward':
+        import ImageReward as RM
+        model = RM.load("ImageReward-v1.0", device=device)
+        # ImageReward handles its own tokenization and processing
+        processor = None
+        tokenizer = None
     
     else:
         raise ValueError(f"Unknown scorer: {scorer}")
 
-    model = model.to(device).eval()
-    time_model_init = time.time()
-    print(f"Model initialized in {time_model_init - start_time:.4f} seconds")
+    if scorer != 'imagereward': # ImageReward model is not a standard nn.Module
+        model = model.to(device).eval()
+        time_model_init = time.time()
+        print(f"Model initialized in {time_model_init - start_time:.4f} seconds")
 
-    if device == 'hpu':
-        print("Compiling model for HPU...")
-        model = torch.compile(model, backend="hpu_backend")
-        time_model_compile = time.time()
-        print(f"Model compiled successfully in {time_model_compile - time_model_init:.4f} seconds")
+        if device == 'hpu':
+            print("Compiling model for HPU...")
+            model = torch.compile(model, backend="hpu_backend")
+            time_model_compile = time.time()
+            print(f"Model compiled successfully in {time_model_compile - time_model_init:.4f} seconds")
+    else:
+        time_model_init = time.time()
+        print(f"Model initialized in {time_model_init - start_time:.4f} seconds")
+
     print("Model initialized successfully.")
 
 
@@ -226,16 +243,41 @@ def analyze_scores(img_dir, prompt_csv_path, output_dir, exp_name, scorer):
                     # score
                     scores = (model.logit_scale.exp() * (text_embs @ image_embs.T))[0]
 
-            if device == 'hpu': htcore.mark_step()
-            time_end_inference = time.time()
+                elif scorer == 'imagereward':
+                    # ImageReward is handled differently as it doesn't return a standard tensor
+                    pass
             
-            latency_transfer = time_end_transfer - time_start_transfer
-            latency_inference = time_end_inference - time_start_inference
+            if scorer != 'imagereward':
+                if device == 'hpu': htcore.mark_step()
+                time_end_inference = time.time()
             
-            # --- Component 4: Post-processing (includes HPU->CPU transfer) ---
-            time_start_post = time.time()
-            scores_cpu = scores.cpu()
-            scores_float = [s.float().item() for s in scores_cpu]
+                latency_transfer = time_end_transfer - time_start_transfer
+                latency_inference = time_end_inference - time_start_inference
+                
+                # --- Component 4: Post-processing (includes HPU->CPU transfer) ---
+                time_start_post = time.time()
+                scores_cpu = scores.cpu()
+                scores_float = [s.float().item() for s in scores_cpu]
+                time_end_post = time.time()
+                latency_post = time_end_post - time_start_post
+            
+            else: # ImageReward specific path
+                time_start_transfer = time.time()
+                # ImageReward uses file paths directly, so no device transfer is measured here.
+                time_end_transfer = time.time()
+                latency_transfer = time_end_transfer - time_start_transfer
+
+                time_start_inference = time.time()
+                with torch.no_grad():
+                     # Use model.score in a loop for robustness, as inference_rank can have inconsistent return types.
+                     scores_float = [model.score(prompt, img_path) for img_path in img_paths_for_prompt]
+                time_end_inference = time.time()
+                latency_inference = time_end_inference - time_start_inference
+
+                time_start_post = time.time()
+                # scores_float is already the list of floats we need.
+                time_end_post = time.time()
+                latency_post = time_end_post - time_start_post
 
             for path, score_val in zip(img_paths_for_prompt, scores_float):
                 results.append({
@@ -244,8 +286,6 @@ def analyze_scores(img_dir, prompt_csv_path, output_dir, exp_name, scorer):
                     'image_path': path,
                     SCORE_NAME: score_val
                 })
-            time_end_post = time.time()
-            latency_post = time_end_post - time_start_post
             
             loop_end_time = time.time()
             latency_total = loop_end_time - data_ready_time # Total time for this loop's work
@@ -393,7 +433,7 @@ if __name__ == '__main__':
     parser.add_argument('--img_dir', type=str, default='/workspace/jh/flux/outputs/250prompts', help='image directory')
     parser.add_argument('--exp', type=str, default='baseline', help='Experiment name')
     parser.add_argument('--prompt_file', type=str, default='../prompts_250.csv', help='prompt csv path')
-    parser.add_argument('--scorer', type=str, default='hpsv2', choices=['hpsv2', 'pickscore'], help='Scoring model to use: hpsv2 or pickscore.')
+    parser.add_argument('--scorer', type=str, default='hpsv2', choices=['hpsv2', 'pickscore', 'imagereward'], help='Scoring model to use: hpsv2, pickscore, or imagereward.')
     args = parser.parse_args()
     
     exp_name = args.exp
