@@ -237,6 +237,7 @@ def analyze_scores(img_dir, prompt_csv_path, output_dir, scorer):
                     image_features, text_features = outputs["image_features"], outputs["text_features"]
                     logits_per_image = image_features @ text_features.T
                     scores = torch.diagonal(logits_per_image)
+                    latency_transfer = time_end_transfer - time_start_transfer  
 
                 elif scorer == 'pickscore':
                     # PickScore: use its processor for both images and text
@@ -258,12 +259,11 @@ def analyze_scores(img_dir, prompt_csv_path, output_dir, scorer):
                 
                     # score
                     scores = (model.logit_scale.exp() * (text_embs @ image_embs.T))[0]
+                    latency_transfer = time_end_transfer - time_start_transfer
 
                 elif scorer == 'imagereward':
                     # ImageReward is handled differently as it doesn't return a standard tensor
-                    pass
-
-            latency_transfer = time_end_transfer - time_start_transfer
+                    latency_transfer = None
 
             if scorer != 'imagereward':
                 if device == 'hpu': htcore.mark_step()
