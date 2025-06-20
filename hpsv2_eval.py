@@ -220,116 +220,113 @@ def analyze_scores(img_dir, prompt_csv_path, output_dir, scorer):
             loop_iter_start_time = time.time()
             continue
 
-        try:
-            time_start_transfer = time.time()
-            # --- Score-specific preprocessing and inference ---
-            # Disable autocast to avoid BFloat16 issues for now
-            with torch.no_grad():
-                if scorer == 'hpsv2':
-                    # HPSv2: transform PIL images to tensors
-                    image_batch_device = torch.stack([processor(img) for img in image_list]).to(device)
-                    text_batch = tokenizer([prompt] * len(image_batch_device)).to(device=device, non_blocking=True)
-                    if device == 'hpu': htcore.mark_step()
-                    time_end_transfer = time.time()
-
-                    time_start_inference = time.time()
-                    outputs = model(image_batch_device, text_batch)
-                    image_features, text_features = outputs["image_features"], outputs["text_features"]
-                    logits_per_image = image_features @ text_features.T
-                    scores = torch.diagonal(logits_per_image)
-                    latency_transfer = time_end_transfer - time_start_transfer  
-
-                elif scorer == 'pickscore':
-                    # PickScore: use its processor for both images and text
-                    image_inputs = processor(
-                        images=image_list, padding=True, truncation=True, max_length=77, return_tensors="pt"
-                    ).to(device)
-                    text_inputs = processor(
-                        text=prompt, padding=True, truncation=True, max_length=77, return_tensors="pt"
-                    ).to(device)
-                    if device == 'hpu': htcore.mark_step()
-                    time_end_transfer = time.time()
-
-                    time_start_inference = time.time()
-                    image_embs = model.get_image_features(**image_inputs)
-                    image_embs = image_embs / torch.norm(image_embs, dim=-1, keepdim=True)
-                
-                    text_embs = model.get_text_features(**text_inputs)
-                    text_embs = text_embs / torch.norm(text_embs, dim=-1, keepdim=True)
-                
-                    # score
-                    scores = (model.logit_scale.exp() * (text_embs @ image_embs.T))[0]
-                    latency_transfer = time_end_transfer - time_start_transfer
-
-                elif scorer == 'imagereward':
-                    # ImageReward is handled differently as it doesn't return a standard tensor
-                    latency_transfer = None
-
-            if scorer != 'imagereward':
+        time_start_transfer = time.time()
+        # --- Score-specific preprocessing and inference ---
+        # Disable autocast to avoid BFloat16 issues for now
+        with torch.no_grad():
+            if scorer == 'hpsv2':
+                # HPSv2: transform PIL images to tensors
+                image_batch_device = torch.stack([processor(img) for img in image_list]).to(device)
+                text_batch = tokenizer([prompt] * len(image_batch_device)).to(device=device, non_blocking=True)
                 if device == 'hpu': htcore.mark_step()
-                time_end_inference = time.time()
-                
-                latency_inference = time_end_inference - time_start_inference
+                time_end_transfer = time.time()
 
-                time_start_post = time.time()
-                
-                # --- Result post-processing ---
-                scores_for_prompt = scores.cpu().numpy()
+                time_start_inference = time.time()
+                outputs = model(image_batch_device, text_batch)
+                image_features, text_features = outputs["image_features"], outputs["text_features"]
+                logits_per_image = image_features @ text_features.T
+                scores = torch.diagonal(logits_per_image)
+                latency_transfer = time_end_transfer - time_start_transfer  
 
-                # Save score for each image
-                for j, score in enumerate(scores_for_prompt):
-                    result = {
-                        'prompt_index': i + 1,
-                        'image_path': img_paths_for_prompt[j],
-                        SCORE_NAME: score
-                    }
-                    results.append(result)
+            elif scorer == 'pickscore':
+                # PickScore: use its processor for both images and text
+                image_inputs = processor(
+                    images=image_list, padding=True, truncation=True, max_length=77, return_tensors="pt"
+                ).to(device)
+                text_inputs = processor(
+                    text=prompt, padding=True, truncation=True, max_length=77, return_tensors="pt"
+                ).to(device)
+                if device == 'hpu': htcore.mark_step()
+                time_end_transfer = time.time()
 
-                latency_post = time.time() - time_start_post
+                time_start_inference = time.time()
+                image_embs = model.get_image_features(**image_inputs)
+                image_embs = image_embs / torch.norm(image_embs, dim=-1, keepdim=True)
+            
+                text_embs = model.get_text_features(**text_inputs)
+                text_embs = text_embs / torch.norm(text_embs, dim=-1, keepdim=True)
+            
+                # score
+                scores = (model.logit_scale.exp() * (text_embs @ image_embs.T))[0]
+                latency_transfer = time_end_transfer - time_start_transfer
 
             elif scorer == 'imagereward':
-                # For ImageReward, we process one image at a time
-                time_start_inference = time.time()
-                
-                for j, img in enumerate(image_list):
-                    # The model.infer method returns a single score
-                    score = model.infer(prompt, [img])
-                    result = {
-                        'prompt_index': i + 1,
-                        'image_path': img_paths_for_prompt[j],
-                        SCORE_NAME: score
-                    }
-                    results.append(result)
+                # ImageReward is handled differently as it doesn't return a standard tensor
+                latency_transfer = -1.0
 
-                if device == 'hpu': htcore.mark_step()
-                time_end_inference = time.time()
-                latency_inference = time_end_inference - time_start_inference
-                time_start_post = time.time()
-                latency_post = time.time() - time_start_post
+        if scorer != 'imagereward':
+            if device == 'hpu': htcore.mark_step()
+            time_end_inference = time.time()
+            
+            latency_inference = time_end_inference - time_start_inference
 
-            # --- Latency calculation ---
-            loop_end_time = time.time()
-            latency_total = loop_end_time - data_ready_time # Total time for this loop's work
+            time_start_post = time.time()
+            
+            # --- Result post-processing ---
+            scores_for_prompt = scores.cpu().numpy()
 
-            # Store latencies
-            latencies['data_loading_wait'].append(latency_data_wait)
-            latencies['data_transfer_to_device'].append(latency_transfer)
-            latencies['model_inference'].append(latency_inference)
-            latencies['result_post_processing'].append(latency_post)
-            latencies['total_loop_time'].append(latency_total)
+            # Save score for each image
+            for j, score in enumerate(scores_for_prompt):
+                result = {
+                    'prompt_index': i + 1,
+                    'image_path': img_paths_for_prompt[j],
+                    SCORE_NAME: score
+                }
+                results.append(result)
 
-            if i < 3:
-                tqdm.write(f"\n--- Latency for prompt {i} ---")
-                tqdm.write(f"  1. Data Loading Wait:       {latency_data_wait:.4f}s")
-                tqdm.write(f"  2. Data Transfer to Device: {latency_transfer:.4f}s")
-                tqdm.write(f"  3. Model Inference:         {latency_inference:.4f}s")
-                tqdm.write(f"  4. Result Post-processing:  {latency_post:.4f}s")
-                tqdm.write(f"  -----------------------------")
-                tqdm.write(f"  Total Active Loop Time:     {latency_total:.4f}s")
+            latency_post = time.time() - time_start_post
 
-        except Exception as e:
-            tqdm.write(f"\nError scoring images for prompt {i}: {e}")
-            tqdm.write(f"Prompt: {prompt}")
+        elif scorer == 'imagereward':
+            # For ImageReward, we process one image at a time
+            time_start_inference = time.time()
+            
+            for j, img in enumerate(image_list):
+                # The model.infer method returns a single score
+                score = model.score(prompt, [img])
+                result = {
+                    'prompt_index': i + 1,
+                    'image_path': img_paths_for_prompt[j],
+                    SCORE_NAME: score
+                }
+                results.append(result)
+
+            if device == 'hpu': htcore.mark_step()
+            time_end_inference = time.time()
+            latency_inference = time_end_inference - time_start_inference
+            time_start_post = time.time()
+            latency_post = time.time() - time_start_post
+
+        # --- Latency calculation ---
+        loop_end_time = time.time()
+        latency_total = loop_end_time - data_ready_time # Total time for this loop's work
+
+        # Store latencies
+        latencies['data_loading_wait'].append(latency_data_wait)
+        latencies['data_transfer_to_device'].append(latency_transfer)
+        latencies['model_inference'].append(latency_inference)
+        latencies['result_post_processing'].append(latency_post)
+        latencies['total_loop_time'].append(latency_total)
+
+        if i < 3:
+            tqdm.write(f"\n--- Latency for prompt {i} ---")
+            tqdm.write(f"  1. Data Loading Wait:       {latency_data_wait:.4f}s")
+            tqdm.write(f"  2. Data Transfer to Device: {latency_transfer:.4f}s")
+            tqdm.write(f"  3. Model Inference:         {latency_inference:.4f}s")
+            tqdm.write(f"  4. Result Post-processing:  {latency_post:.4f}s")
+            tqdm.write(f"  -----------------------------")
+            tqdm.write(f"  Total Active Loop Time:     {latency_total:.4f}s")
+
+
 
         # Reset timer for the next iteration's wait time measurement
         loop_iter_start_time = time.time()
