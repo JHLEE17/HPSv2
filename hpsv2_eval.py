@@ -14,6 +14,7 @@ from torch.utils.data import Dataset, DataLoader
 # PickScore needs to be imported if used
 # from transformers import AutoProcessor, AutoModel
 import huggingface_hub
+import argparse
 
 
 # Habana-specific imports, though the script logic will be device-agnostic.
@@ -68,7 +69,7 @@ def custom_collate_fn(batch):
     return images_list, prompts, paths_list
 
 
-def analyze_scores(img_dir, prompt_csv_path, output_dir, exp_name, scorer):
+def analyze_scores(img_dir, prompt_csv_path, output_dir, scorer):
     """
     Calculates HPSv2 or PickScore for generated images, saves them to a CSV file,
     prints statistics, and creates a visualization of the score distribution.
@@ -103,8 +104,22 @@ def analyze_scores(img_dir, prompt_csv_path, output_dir, exp_name, scorer):
         from hpsv2.src.open_clip import create_model_and_transforms, get_tokenizer
         from hpsv2.utils import root_path, hps_version_map
         hps_version = "v2.1"
+        
+        # Determine precision based on device capabilities
+        if device == 'hpu':
+            # HPU supports amp with bfloat16
+            precision = 'fp32'
+        elif device == 'cuda' and torch.cuda.is_bf16_supported():
+            # Use amp if bfloat16 is supported on CUDA
+            precision = 'fp32'
+        else:
+            # Fall back to fp32 to avoid BFloat16 issues
+            precision = 'fp32'
+        
+        print(f"Using precision: {precision} for HPSv2 model")
+        
         model, _, processor = create_model_and_transforms(
-            'ViT-H-14', 'laion2B-s32B-b79K', precision='amp', device=device, jit=False,
+            'ViT-H-14', 'laion2B-s32B-b79K', precision=precision, device=device, jit=False,
             force_quick_gelu=False, force_custom_text=False, force_patch_dropout=False,
             force_image_size=None, pretrained_image=False, image_mean=None, image_std=None,
             light_augmentation=True, aug_cfg={}, output_dict=True, with_score_predictor=False,
@@ -208,7 +223,8 @@ def analyze_scores(img_dir, prompt_csv_path, output_dir, exp_name, scorer):
         try:
             time_start_transfer = time.time()
             # --- Score-specific preprocessing and inference ---
-            with torch.no_grad(), torch.amp.autocast(device_type=device):
+            # Disable autocast to avoid BFloat16 issues for now
+            with torch.no_grad():
                 if scorer == 'hpsv2':
                     # HPSv2: transform PIL images to tensors
                     image_batch_device = torch.stack([processor(img) for img in image_list]).to(device)
@@ -246,47 +262,52 @@ def analyze_scores(img_dir, prompt_csv_path, output_dir, exp_name, scorer):
                 elif scorer == 'imagereward':
                     # ImageReward is handled differently as it doesn't return a standard tensor
                     pass
-            
+
+            latency_transfer = time_end_transfer - time_start_transfer
+
             if scorer != 'imagereward':
                 if device == 'hpu': htcore.mark_step()
                 time_end_inference = time.time()
-            
-                latency_transfer = time_end_transfer - time_start_transfer
-                latency_inference = time_end_inference - time_start_inference
                 
-                # --- Component 4: Post-processing (includes HPU->CPU transfer) ---
-                time_start_post = time.time()
-                scores_cpu = scores.cpu()
-                scores_float = [s.float().item() for s in scores_cpu]
-                time_end_post = time.time()
-                latency_post = time_end_post - time_start_post
-            
-            else: # ImageReward specific path
-                time_start_transfer = time.time()
-                # ImageReward uses file paths directly, so no device transfer is measured here.
-                time_end_transfer = time.time()
-                latency_transfer = time_end_transfer - time_start_transfer
+                latency_inference = time_end_inference - time_start_inference
 
+                time_start_post = time.time()
+                
+                # --- Result post-processing ---
+                scores_for_prompt = scores.cpu().numpy()
+
+                # Save score for each image
+                for j, score in enumerate(scores_for_prompt):
+                    result = {
+                        'prompt_index': i + 1,
+                        'image_path': img_paths_for_prompt[j],
+                        SCORE_NAME: score
+                    }
+                    results.append(result)
+
+                latency_post = time.time() - time_start_post
+
+            elif scorer == 'imagereward':
+                # For ImageReward, we process one image at a time
                 time_start_inference = time.time()
-                with torch.no_grad():
-                     # Use model.score in a loop for robustness, as inference_rank can have inconsistent return types.
-                     scores_float = [model.score(prompt, img_path) for img_path in img_paths_for_prompt]
+                
+                for j, img in enumerate(image_list):
+                    # The model.infer method returns a single score
+                    score = model.infer(prompt, [img])
+                    result = {
+                        'prompt_index': i + 1,
+                        'image_path': img_paths_for_prompt[j],
+                        SCORE_NAME: score
+                    }
+                    results.append(result)
+
+                if device == 'hpu': htcore.mark_step()
                 time_end_inference = time.time()
                 latency_inference = time_end_inference - time_start_inference
-
                 time_start_post = time.time()
-                # scores_float is already the list of floats we need.
-                time_end_post = time.time()
-                latency_post = time_end_post - time_start_post
+                latency_post = time.time() - time_start_post
 
-            for path, score_val in zip(img_paths_for_prompt, scores_float):
-                results.append({
-                    'prompt_index': i,
-                    'prompt': prompt,
-                    'image_path': path,
-                    SCORE_NAME: score_val
-                })
-            
+            # --- Latency calculation ---
             loop_end_time = time.time()
             latency_total = loop_end_time - data_ready_time # Total time for this loop's work
 
@@ -326,125 +347,95 @@ def analyze_scores(img_dir, prompt_csv_path, output_dir, exp_name, scorer):
             warmup_iterations = 5
             stable_values = values[warmup_iterations:]
             if stable_values:
-                mean_val = np.mean(stable_values)
-                print(f"  Average {name.replace('_', ' ').title()}: {mean_val:.4f}s")
-    print("------------------------------------------\n")
-
-    # 4. Save scores to CSV and print statistics
-    results_df = pd.DataFrame(results)
-    results_df.to_csv(OUTPUT_CSV_PATH, index=False)
-    print(f"\nScores saved to {OUTPUT_CSV_PATH}")
-
-    scores = results_df[SCORE_NAME]
-    mean_score = scores.mean()
-    variance_score = scores.var()
-    min_score = scores.min()
-    max_score = scores.max()
-
-    print(f"\n--- {scorer.upper()} Score Statistics ---")
-    print(f"Average Score: {mean_score:.4f}")
-    print(f"Variance:      {variance_score:.4f}")
-    print(f"Minimum Score: {min_score:.4f}")
-    print(f"Maximum Score: {max_score:.4f}")
-    print("------------------------------")
-
-    # 5. Find and save top/bottom scored prompts and images
-    top_5 = results_df.nlargest(5, SCORE_NAME)
-    bottom_5 = results_df.nsmallest(5, SCORE_NAME)
-
-    with open(OUTPUT_STATS_PATH, 'w') as f:
-        f.write(f"--- Top 5 Highest {scorer.upper()} Scores ---\n")
-        for _, row in top_5.iterrows():
-            image_number = os.path.basename(row['image_path']).split('_')[1].split('.')[0]
-            f.write(f"Score: {row[SCORE_NAME]:.4f}\n")
-            f.write(f"Image Number: {image_number}\n")
-            f.write(f"Prompt: {row['prompt']}\n\n")
-
-        f.write(f"\n--- Top 5 Lowest {scorer.upper()} Scores ---\n")
-        for _, row in bottom_5.iterrows():
-            image_number = os.path.basename(row['image_path']).split('_')[1].split('.')[0]
-            f.write(f"Score: {row[SCORE_NAME]:.4f}\n")
-            f.write(f"Image Number: {image_number}\n")
-            f.write(f"Prompt: {row['prompt']}\n\n")
-
-    print(f"Top/bottom score details saved to {OUTPUT_STATS_PATH}")
-
-
-    # 6. Create visualization for top/bottom images
-    fig, axs = plt.subplots(2, 5, figsize=(25, 10))
-    fig.suptitle(f'Top and Bottom 5 {scorer.upper()} Scored Images', fontsize=24, y=1.02)
-
-    # --- Consolidate plotting logic to avoid errors ---
-    datasets_to_plot = [(top_5, 0), (bottom_5, 1)]
-
-    for df, row_idx in datasets_to_plot:
-        # Use reset_index to ensure we have a continuous index for enumeration
-        df_reset = df.reset_index(drop=True)
-        for col_idx in range(5):
-            ax = axs[row_idx, col_idx]
-            ax.axis('off')
-            # Check if a corresponding image exists in the dataframe
-            if col_idx < len(df_reset):
-                row = df_reset.iloc[col_idx]
-                try:
-                    img = Image.open(row['image_path'])
-                    ax.imshow(img)
-                    filename = os.path.basename(row['image_path'])
-                    score = row[SCORE_NAME]
-                    ax.set_title(f"{filename}\nScore: {score:.4f}", fontsize=12)
-                except FileNotFoundError:
-                    ax.set_title(f"Image not found\n{os.path.basename(row['image_path'])}", fontsize=10)
-                except Exception as e:
-                    ax.set_title(f"Error plotting", fontsize=10)
-                    tqdm.write(f"Error plotting image {row['image_path']}: {e}")
-            else:
-                # If there are fewer than 5 images, leave the subplot blank
-                pass
+                avg_latency = sum(stable_values) / len(stable_values)
+                tqdm.write(f"  Average {name.replace('_', ' ').title()}: {avg_latency:.4f}s")
     
-    # Add row titles to the left of the grid
-    axs[0, 0].text(-0.15, 0.5, 'Top 5\nHighest Scores', transform=axs[0, 0].transAxes,
-                   ha='center', va='center', rotation='vertical', fontsize=18)
-    axs[1, 0].text(-0.15, 0.5, 'Top 5\nLowest Scores', transform=axs[1, 0].transAxes,
-                   ha='center', va='center', rotation='vertical', fontsize=18)
+    # --- 4. Process and Save Results ---
+    if results:
+        df = pd.DataFrame(results)
+        
+        # Save all scores to a single CSV
+        df.to_csv(OUTPUT_CSV_PATH, index=False)
+        print(f"\nScores saved to {OUTPUT_CSV_PATH}")
 
-    plt.tight_layout(pad=1.0, w_pad=0.5, h_pad=2.0)
-    plt.savefig(OUTPUT_TOP_BOTTOM_FIG_PATH, bbox_inches='tight')
-    print(f"Top/bottom images visualization saved to {OUTPUT_TOP_BOTTOM_FIG_PATH}")
+        # --- 5. Statistics and Visualization ---
+        print(f"\n--- Statistics for {SCORE_NAME} ---")
+        print(df[SCORE_NAME].describe())
+        
+        # Create histogram
+        plt.figure(figsize=(10, 6))
+        plt.hist(df[SCORE_NAME], bins=50, color='blue', alpha=0.7)
+        plt.title(f'Distribution of {SCORE_NAME}')
+        plt.xlabel(SCORE_NAME)
+        plt.ylabel('Frequency')
+        plt.grid(True)
+        plt.savefig(OUTPUT_FIG_PATH)
+        plt.close()
+        print(f"Histogram saved to {OUTPUT_FIG_PATH}")
+        
+        # Find and save top 5 and bottom 5 scores
+        top_5 = df.nlargest(5, SCORE_NAME)
+        bottom_5 = df.nsmallest(5, SCORE_NAME)
+        
+        with open(OUTPUT_STATS_PATH, 'w') as f:
+            f.write(f"--- Top 5 {SCORE_NAME} ---\n")
+            f.write(top_5.to_string())
+            f.write("\n\n")
+            f.write(f"--- Bottom 5 {SCORE_NAME} ---\n")
+            f.write(bottom_5.to_string())
+        print(f"Top and bottom scores saved to {OUTPUT_STATS_PATH}")
+        
+        # Save top and bottom images
+        try:
+            fig, axes = plt.subplots(2, 5, figsize=(20, 10))
+            fig.suptitle(f'Top and Bottom 5 Images based on {SCORE_NAME}', fontsize=16)
+            for i, row in enumerate(top_5.itertuples()):
+                # Use getattr to access score column dynamically
+                score_val = getattr(row, SCORE_NAME)
+                img = Image.open(row.image_path)
+                axes[0, i].imshow(img)
+                axes[0, i].set_title(f"Top {i+1}\nScore: {score_val:.4f}")
+                axes[0, i].axis('off')
+            for i, row in enumerate(bottom_5.itertuples()):
+                # Use getattr to access score column dynamically
+                score_val = getattr(row, SCORE_NAME)
+                img = Image.open(row.image_path)
+                axes[1, i].imshow(img)
+                axes[1, i].set_title(f"Bottom {i+1}\nScore: {score_val:.4f}")
+                axes[1, i].axis('off')
+            
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            plt.savefig(OUTPUT_TOP_BOTTOM_FIG_PATH)
+            plt.close()
+            print(f"Top and bottom images visualization saved to {OUTPUT_TOP_BOTTOM_FIG_PATH}")
+        except Exception as e:
+            print(f"Could not save top/bottom images visualization: {e}")
 
-
-    # 7. Visualize the scores (Histogram)
-    plt.style.use('ggplot')
-    plt.figure(figsize=(12, 7))
-    plt.hist(scores, bins=50, alpha=0.75, color='royalblue', edgecolor='black')
-    plt.title(f'Distribution of {scorer.upper()} Scores for {exp_name}', fontsize=18)
-    plt.xlabel(f'{scorer.upper()} Score', fontsize=14)
-    plt.ylabel('Frequency', fontsize=14)
-    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    plt.axvline(mean_score, color='red', linestyle='dashed', linewidth=2, label=f'Mean: {mean_score:.4f}')
-    plt.legend()
+def main():
+    parser = argparse.ArgumentParser(
+        description='Calculate HPSv2, PickScore, or ImageReward for a directory of images against a list of prompts.')
     
-    plt.savefig(OUTPUT_FIG_PATH)
-    print(f"Score distribution histogram saved to {OUTPUT_FIG_PATH}")
+    parser.add_argument('--img-dir', type=str, required=True,
+                        help='Directory containing the generated images.')
+    parser.add_argument('--prompt-csv-path', type=str, 
+                        default='/workspace/jh/flux/eval/prompts_250.csv',
+                        help='Path to the CSV file containing prompts.')
+    parser.add_argument('--output-dir', type=str, required=True,
+                        help='Directory where the output CSV and plots will be saved.')
+    parser.add_argument('--scorer', type=str, default='hpsv2',
+                        choices=['hpsv2', 'pickscore', 'imagereward'],
+                        help='The scoring model to use.')
+
+    args = parser.parse_args()
+    
+    if not os.path.isdir(args.img_dir):
+        print(f"Error: Image directory not found at {args.img_dir}")
+        return
+        
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    analyze_scores(args.img_dir, args.prompt_csv_path, args.output_dir, args.scorer)
 
 
 if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--img_dir', type=str, default='/workspace/jh/flux/outputs/250prompts', help='image directory')
-    parser.add_argument('--exp', type=str, default='baseline', help='Experiment name')
-    parser.add_argument('--prompt_file', type=str, default='../prompts_250.csv', help='prompt csv path')
-    parser.add_argument('--scorer', type=str, default='hpsv2', choices=['hpsv2', 'pickscore', 'imagereward'], help='Scoring model to use: hpsv2, pickscore, or imagereward.')
-    args = parser.parse_args()
-    
-    exp_name = args.exp
-    img_dir = f'{args.img_dir}/{exp_name}'
-    prompt_file = args.prompt_file
-    scorer = args.scorer
-
-    if not os.path.exists(prompt_file):
-        print(f"Error: Prompt file not found at {prompt_file}")
-        exit(1)
-    output_dir = f'../hpsv2_eval/{exp_name}' # Keeping the parent output directory the same for consistency
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    analyze_scores(img_dir, prompt_file, output_dir, exp_name, scorer)
+    main()
