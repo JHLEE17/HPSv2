@@ -362,16 +362,50 @@ def analyze_scores(img_dir, prompt_csv_path, output_dir, scorer):
         print(f"\n--- Statistics for {SCORE_NAME} ---")
         print(df[SCORE_NAME].describe())
         
+        # Create histogram with statistics
+        plt.figure(figsize=(12, 8))
+        
+        # Calculate statistics
+        scores_data = df[SCORE_NAME]
+        mean_val = scores_data.mean()
+        std_val = scores_data.std()
+        median_val = scores_data.median()
+        min_val = scores_data.min()
+        max_val = scores_data.max()
+        count_val = len(scores_data)
+        
         # Create histogram
-        plt.figure(figsize=(10, 6))
-        plt.hist(df[SCORE_NAME], bins=50, color='blue', alpha=0.7)
-        plt.title(f'Distribution of {SCORE_NAME}')
-        plt.xlabel(SCORE_NAME)
-        plt.ylabel('Frequency')
-        plt.grid(True)
-        plt.savefig(OUTPUT_FIG_PATH)
+        n, bins, patches = plt.hist(scores_data, bins=50, color='blue', alpha=0.7, edgecolor='black')
+        
+        # Add vertical lines for statistics
+        plt.axvline(mean_val, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_val:.4f}')
+        plt.axvline(median_val, color='green', linestyle='--', linewidth=2, label=f'Median: {median_val:.4f}')
+        
+        # Add statistics text box
+        stats_text = f'''Statistics:
+Count: {count_val}
+Mean: {mean_val:.4f}
+Median: {median_val:.4f}
+Std: {std_val:.4f}
+Min: {min_val:.4f}
+Max: {max_val:.4f}'''
+        
+        # Position text box in upper right corner
+        plt.text(0.98, 0.98, stats_text, transform=plt.gca().transAxes, 
+                fontsize=11, verticalalignment='top', horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='gray'))
+        
+        plt.title(f'Distribution of {SCORE_NAME}', fontsize=14, fontweight='bold')
+        plt.xlabel(SCORE_NAME, fontsize=12)
+        plt.ylabel('Frequency', fontsize=12)
+        plt.legend(loc='upper left')
+        plt.grid(True, alpha=0.3)
+        
+        # Adjust layout to prevent text cutoff
+        plt.tight_layout()
+        plt.savefig(OUTPUT_FIG_PATH, dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"Histogram saved to {OUTPUT_FIG_PATH}")
+        print(f"Histogram with statistics saved to {OUTPUT_FIG_PATH}")
         
         # Find and save top 5 and bottom 5 scores
         top_5 = df.nlargest(5, SCORE_NAME)
