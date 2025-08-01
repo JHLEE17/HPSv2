@@ -1,0 +1,15 @@
+--- Top 5 pickscore_score ---
+     prompt_index                              image_path  pickscore_score
+754           189  ../HiDream-I1/output/dev/image_755.png        27.202135
+752           189  ../HiDream-I1/output/dev/image_753.png        26.631372
+753           189  ../HiDream-I1/output/dev/image_754.png        26.331760
+755           189  ../HiDream-I1/output/dev/image_756.png        26.152786
+824           207  ../HiDream-I1/output/dev/image_825.png        25.864756
+
+--- Bottom 5 pickscore_score ---
+     prompt_index                              image_path  pickscore_score
+427           107  ../HiDream-I1/output/dev/image_428.png        18.027199
+924           232  ../HiDream-I1/output/dev/image_925.png        18.163719
+424           107  ../HiDream-I1/output/dev/image_425.png        18.378147
+925           232  ../HiDream-I1/output/dev/image_926.png        18.419144
+425           107  ../HiDream-I1/output/dev/image_426.png        18.461267

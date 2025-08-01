@@ -1,0 +1,15 @@
+--- Top 5 hps_score ---
+     prompt_index                              image_path  hps_score
+934           234  ../HiDream-I1/output/dev/image_935.png   0.405024
+933           234  ../HiDream-I1/output/dev/image_934.png   0.402846
+935           234  ../HiDream-I1/output/dev/image_936.png   0.401144
+932           234  ../HiDream-I1/output/dev/image_933.png   0.396818
+420           106  ../HiDream-I1/output/dev/image_421.png   0.393232
+
+--- Bottom 5 hps_score ---
+     prompt_index                              image_path  hps_score
+157            40  ../HiDream-I1/output/dev/image_158.png   0.203981
+159            40  ../HiDream-I1/output/dev/image_160.png   0.206911
+515           129  ../HiDream-I1/output/dev/image_516.png   0.207921
+724           182  ../HiDream-I1/output/dev/image_725.png   0.209627
+156            40  ../HiDream-I1/output/dev/image_157.png   0.211454
